@@ -423,7 +423,7 @@ int main(int argc, char *argv[]) {
     // FIXME: should catch Ctrl-C and logout from AniDB in case of iterrupt.
     // Open connections cause ban for a while
     //
-    printf("Warning! Logged into AniDB database. Please don't abort to avoid loosing this session\n", ANIDB_WAIT);
+    printf("Warning! Logged into AniDB database. Please don't abort to avoid loosing this session\n");
 
     int filei;
     int goodc = 0;
