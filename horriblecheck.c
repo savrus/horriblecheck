@@ -315,8 +315,8 @@ int fill_fileinfo(struct fileinfo *fi, char *filename, rhash rctx) {
 void usage() {
     printf("Usage: horriblecheck [-u user] [-s file.sfv] file1 file2...\n");
     printf("Check if file1, file2,... exits in the AniDB database\n");
-    printf("\t-u user\tUser name to connect to AniDB\n");
-    printf("\t-s file.sfv\tCreate sfv file with crc hashes for file1, file2,...\n");
+    printf("  -u user        User name to connect to AniDB\n");
+    printf("  -s file.sfv    Create sfv file with crc hashes for file1, file2,...\n");
     exit(0);
 }
 
