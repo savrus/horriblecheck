@@ -258,7 +258,7 @@ int anidb_session_query(struct anidb_session *session) {
     return 0;
 }
 int anidb_session_file(struct anidb_session *session, const char *ed2k, long long size) {
-    size_t len = snprintf(session->sbuf, session->slen, "FILE size=%lld&ed2k=%s&fmask=7008&amask=C08080", size, ed2k);
+    size_t len = snprintf(session->sbuf, session->slen, "FILE size=%lld&ed2k=%s&fmask=7108&amask=C0808040", size, ed2k);
     if (len +1 > session->slen) {
         printf("Line is too large\n");
         return -1;
