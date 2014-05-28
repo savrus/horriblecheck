@@ -23,6 +23,8 @@
 #include <termios.h>
 #include "rhash.h"
 
+#define OFFLINE 0
+
 int sstartswith(const char *s1, const char *s2) {
     return ! strncmp(s1, s2, strlen(s2));
 }
@@ -103,6 +105,158 @@ int anidb_cache_find_entry(struct anidb_cache *cache, const char *key, char *vbu
     return 0;
 }
 
+//======================= AniDB File Info parser ================================
+
+#define ANIDB_PACKET_SIZE (1400)
+
+struct anidb_fileinfo {
+    char buf[ANIDB_PACKET_SIZE];
+    char fmask[5];
+    char amask[4];
+    uint32_t fid;
+    uint32_t aid;
+    uint32_t eid;
+    uint32_t gid;
+    uint16_t state;
+    int state_ver;
+    int state_crc;
+    int state_cen;
+    char *crc32;
+    uint32_t totaleps;
+    uint32_t maxepno;
+    char *aname;
+    char *epno;
+    char *gsname;
+};
+#define ANIDB_FILE_STATE_CRCOK  (1)
+#define ANIDB_FILE_STATE_CRCERR (2)
+#define ANIDB_FILE_STATE_UNC    (1)
+#define ANIDB_FILE_STATE_CEN    (2)
+
+int anidb_fileinfo_parse(const char *str, const char *fmask_str, const char *amask_str, struct anidb_fileinfo *afinfo) {
+    if (!sstartswith(str, "220 FILE ")) return -1;
+    str += strlen("220 FILE ");
+
+    memset(afinfo, 0, sizeof(struct anidb_fileinfo));
+
+    assert(strlen(str) < sizeof(afinfo->buf));
+    strcpy(afinfo->buf, str);
+    char *buf = afinfo->buf;
+
+    int i;
+    char *fmask = afinfo->fmask;
+    char *amask = afinfo->amask;
+    char mask[3] = {0,0,0};
+    for (i = 0; i < strlen(fmask_str); i+= 2) {
+        mask[0] = fmask_str[i];
+        mask[1] = fmask_str[i+1];
+        fmask[i/2] = strtol(mask, NULL, 16);
+    }
+    for (i = 0; i < strlen(amask_str); i+= 2) {
+        mask[0] = amask_str[i];
+        mask[1] = amask_str[i+1];
+        amask[i/2] = strtol(mask, NULL, 16);
+    }
+
+    char *s, *saveptr;
+    s = strtok_r(buf, "|", &saveptr);
+    afinfo->fid = strtol(s, NULL, 10);
+    if (fmask[0] & 0x80) { assert(0); /* unused */ }
+    if (fmask[0] & 0x40) { s = strtok_r(NULL, "|", &saveptr); afinfo->aid = strtol(s, NULL, 10); /* int4 aid */ }
+    if (fmask[0] & 0x20) { s = strtok_r(NULL, "|", &saveptr); afinfo->eid = strtol(s, NULL, 10); /* int4 eid */ }
+    if (fmask[0] & 0x10) { s = strtok_r(NULL, "|", &saveptr); afinfo->gid = strtol(s, NULL, 10); /* int4 gid */ }
+    if (fmask[0] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* int4 mylist id */ }
+    if (fmask[0] & 0x04) { s = strtok_r(NULL, "|", &saveptr); /* list other episodes */ }
+    if (fmask[0] & 0x02) { s = strtok_r(NULL, "|", &saveptr); /* int2 IsDeprecated */ }
+    if (fmask[0] & 0x01) { s = strtok_r(NULL, "|", &saveptr); afinfo->state = strtol(s, NULL, 10); /* int2 state */ }
+
+    if (fmask[1] & 0x80) { s = strtok_r(NULL, "|", &saveptr); /* int8 size */ }
+    if (fmask[1] & 0x40) { s = strtok_r(NULL, "|", &saveptr); /* str ed2k */ }
+    if (fmask[1] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* str md5 */ }
+    if (fmask[1] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* str sha1 */ }
+    if (fmask[1] & 0x08) { s = strtok_r(NULL, "|", &saveptr); afinfo->crc32 = s; /* str crc32 */ }
+    if (fmask[1] & 0x04) { assert(0); /* unused */ }
+    if (fmask[1] & 0x02) { s = strtok_r(NULL, "|", &saveptr); /* video colour depth */ }
+    if (fmask[1] & 0x01) { assert(0); /* reserved */ }
+
+    if (fmask[2] & 0x80) { s = strtok_r(NULL, "|", &saveptr); /* str quality */ }
+    if (fmask[2] & 0x40) { s = strtok_r(NULL, "|", &saveptr); /* str source */ }
+    if (fmask[2] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* str audio codec list */ }
+    if (fmask[2] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* int4 audio bitrate list */ }
+    if (fmask[2] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* str video codec */ }
+    if (fmask[2] & 0x04) { s = strtok_r(NULL, "|", &saveptr); /* int4 video bitrate */ }
+    if (fmask[2] & 0x02) { s = strtok_r(NULL, "|", &saveptr); /* str video resolution */ }
+    if (fmask[2] & 0x01) { s = strtok_r(NULL, "|", &saveptr); /* str file type (extension) */ }
+
+    if (fmask[3] & 0x80) { s = strtok_r(NULL, "|", &saveptr); /* str dub language */ }
+    if (fmask[3] & 0x40) { s = strtok_r(NULL, "|", &saveptr); /* str sub language */ }
+    if (fmask[3] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* int4 length in seconds */ }
+    if (fmask[3] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* str description */ }
+    if (fmask[3] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* nt4 aired date */ }
+    if (fmask[3] & 0x04) { assert(0); /* unused */ }
+    if (fmask[3] & 0x02) { assert(0); /* unused */ }
+    if (fmask[3] & 0x01) { s = strtok_r(NULL, "|", &saveptr); /* str anidb file name */ }
+
+    if (fmask[4] & 0x80) { s = strtok_r(NULL, "|", &saveptr); /* int4 mylist state */ }
+    if (fmask[4] & 0x40) { s = strtok_r(NULL, "|", &saveptr); /* int4 mylist filestate */ }
+    if (fmask[4] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* int4 mylist viewed */ }
+    if (fmask[4] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* int4 mylist viewdate */ }
+    if (fmask[4] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* str mylist storage */ }
+    if (fmask[4] & 0x04) { s = strtok_r(NULL, "|", &saveptr); /* str mylist source */ }
+    if (fmask[4] & 0x02) { s = strtok_r(NULL, "|", &saveptr); /* str mylist other */ }
+    if (fmask[4] & 0x01) { assert(0); /* unused */ }
+
+    if (amask[0] & 0x80) { s = strtok_r(NULL, "|", &saveptr); afinfo->totaleps = strtol(s, NULL, 10); /* int4 anime total episodes */ }
+    if (amask[0] & 0x40) { s = strtok_r(NULL, "|", &saveptr); afinfo->maxepno = strtol(s, NULL, 10); /* int4 highest episode number */ }
+    if (amask[0] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* str year */ }
+    if (amask[0] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* str type */ }
+    if (amask[0] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* str related aid list */ }
+    if (amask[0] & 0x04) { s = strtok_r(NULL, "|", &saveptr); /* str related aid type */ }
+    if (amask[0] & 0x02) { s = strtok_r(NULL, "|", &saveptr); /* str category list */ }
+    if (amask[0] & 0x01) { assert(0);  /* reserved */ }
+
+    if (amask[1] & 0x80) { s = strtok_r(NULL, "|", &saveptr); afinfo->aname = s; /* str romaji name */ }
+    if (amask[1] & 0x40) { s = strtok_r(NULL, "|", &saveptr); /* str kanji name */ }
+    if (amask[1] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* str english name */ }
+    if (amask[1] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* str other name */ }
+    if (amask[1] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* str short name list */ }
+    if (amask[1] & 0x04) { s = strtok_r(NULL, "|", &saveptr); /* str synonym list */ }
+    if (amask[1] & 0x02) { assert(0);  /* retired */ }
+    if (amask[1] & 0x01) { assert(0);  /* retired */ }
+
+    if (amask[2] & 0x80) { s = strtok_r(NULL, "|", &saveptr); afinfo->epno = s; /* str epno */ }
+    if (amask[2] & 0x40) { s = strtok_r(NULL, "|", &saveptr); /* str ep name */ }
+    if (amask[2] & 0x20) { s = strtok_r(NULL, "|", &saveptr); /* str ep romaji name */ }
+    if (amask[2] & 0x10) { s = strtok_r(NULL, "|", &saveptr); /* str ep kanji name */ }
+    if (amask[2] & 0x08) { s = strtok_r(NULL, "|", &saveptr); /* int4 episode rating */ }
+    if (amask[2] & 0x04) { s = strtok_r(NULL, "|", &saveptr); /* int4 episode vote count */ }
+    if (amask[2] & 0x02) { assert(0); /* unused */ }
+    if (amask[2] & 0x01) { assert(0); /* unused */ }
+
+    if (amask[3] & 0x80) { s = strtok_r(NULL, "|", &saveptr); /* str group name */ }
+    if (amask[3] & 0x40) { s = strtok_r(NULL, "|", &saveptr); afinfo->gsname = s; /* str group short name */ }
+    if (amask[3] & 0x20) { assert(0); /* unused */ }
+    if (amask[3] & 0x10) { assert(0); /* unused */ }
+    if (amask[3] & 0x08) { assert(0); /* unused */ }
+    if (amask[3] & 0x04) { assert(0); /* unused */ }
+    if (amask[3] & 0x02) { assert(0); /* unused */ }
+    if (amask[3] & 0x01) { s = strtok_r(NULL, "|", &saveptr); /* int4 date aid record updated */ }
+
+    if (afinfo->state != 0) {
+        afinfo->state_ver = 1;
+        if (afinfo->state & 0x01) afinfo->state_crc = ANIDB_FILE_STATE_CRCOK;
+        if (afinfo->state & 0x02) afinfo->state_crc = ANIDB_FILE_STATE_CRCERR;
+        if (afinfo->state & 0x04) afinfo->state_ver = 2;
+        if (afinfo->state & 0x08) afinfo->state_ver = 3;
+        if (afinfo->state & 0x10) afinfo->state_ver = 4;
+        if (afinfo->state & 0x20) afinfo->state_ver = 5;
+        if (afinfo->state & 0x40) afinfo->state_cen = ANIDB_FILE_STATE_UNC;
+        if (afinfo->state & 0x80) afinfo->state_cen = ANIDB_FILE_STATE_CEN;
+    }
+
+    return 0;
+}
+
 
 //======================= AniDB connection stuff ================================
 
@@ -141,6 +295,9 @@ void anidb_comm_fini(struct anidb_comm *comm) {
     close(comm->socket);
 }
 int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, size_t rlen) {
+#if OFFLINE
+    return 0;
+#endif
     time_t now = time(NULL);
     if (now - comm->last < ANIDB_WAIT) {
         unsigned w = ANIDB_WAIT - (now - comm->last) + 1;
@@ -257,8 +414,10 @@ int anidb_session_query(struct anidb_session *session) {
     session->sbuf[len] = '\0';
     return 0;
 }
-int anidb_session_file(struct anidb_session *session, const char *ed2k, long long size) {
-    size_t len = snprintf(session->sbuf, session->slen, "FILE size=%lld&ed2k=%s&fmask=7108&amask=C0808040", size, ed2k);
+int anidb_session_file(struct anidb_session *session, const char *ed2k, long long size, struct anidb_fileinfo *afinfo) {
+    char *fmask = "7108";
+    char *amask = "C0808040";
+    size_t len = snprintf(session->sbuf, session->slen, "FILE size=%lld&ed2k=%s&fmask=%s&amask=%s", size, ed2k, fmask, amask);
     if (len +1 > session->slen) {
         printf("Line is too large\n");
         return -1;
@@ -276,11 +435,16 @@ int anidb_session_file(struct anidb_session *session, const char *ed2k, long lon
         }
     }
 
-    if (sstartswith(session->rbuf, "220 FILE")) return 1;
-    if (sstartswith(session->rbuf, "322 MULTIPLE FILES FOUND")) return 1;
     if (sstartswith(session->rbuf, "320 NO SUCH FILE")) return 0;
-    printf("Unknown reply \"%s\" for file query \"%s\"\n", session->rbuf, session->sbuf);
-    return -1;
+    if (!(sstartswith(session->rbuf, "220 FILE") && !sstartswith(session->rbuf, "322 MULTIPLE FILES FOUND"))) {
+        printf("Unknown reply \"%s\" for file query \"%s\"\n", session->rbuf, session->sbuf);
+        return -1;
+    }
+
+    //FIXME answer "322 MULTIPLE FILES FOUND" is unsupported here
+    anidb_fileinfo_parse(session->rbuf, fmask, amask, afinfo);
+
+    return 1;
 }
 
 //======================== manage files ================================
@@ -406,15 +570,20 @@ int main(int argc, char *argv[]) {
         perror("calloc");
         exit(1);
     }
+    struct anidb_fileinfo *afi = calloc(filesc, sizeof(struct anidb_fileinfo));
+    if (afi == NULL) {
+        perror("calloc");
+        exit(1);
+    }
     
     printf("Timeout for each query is %d seconds. Be patient.\n", ANIDB_WAIT);
 
-#if 1
     struct anidb_session session;
     if (anidb_session_init(&session) == -1) {
         printf("Unable to connect ot AniDB\n");
         exit(1);
     }
+#if !OFFLINE
     if (anidb_session_auth(&session, username, password) == -1) {
         exit(1);
     }
@@ -428,21 +597,39 @@ int main(int argc, char *argv[]) {
     int filei;
     int goodc = 0;
     for (filei = 0; argi < argc; ++argi, ++filei) {
+        printf("%s", argv[argi]);
+        fflush(stdout);
         int r;
         r = fill_fileinfo(&fi[filei], argv[argi], rctx);
         if (r == -1) {
-            printf("%s ERR (unable to open file)\n", argv[argi]);
+            printf(" ERR (unable to open file)\n");
             continue;
         }
 
         #if 1
-        r = anidb_session_file(&session, fi[filei].ed2k, fi[filei].size);
+        r = anidb_session_file(&session, fi[filei].ed2k, fi[filei].size, &afi[filei]);
         if (r == 1) {
             fi[filei].good = 1;
             goodc++;
         }
         #endif
-        printf("%s %s\n", argv[argi], r == 1 ? "OK" : "ERR");
+        printf(" %s", r == 1 ? "OK" : "ERR");
+        if (afi[filei].state_ver > 1 || afi[filei].state_crc != ANIDB_FILE_STATE_CRCOK || afi[filei].state_cen == ANIDB_FILE_STATE_CEN) {
+            printf(" (");
+            char *sep = "";
+            if (afi[filei].state_ver > 1) {
+                printf("V%d", afi[filei].state_ver);
+                sep = " ";
+            }
+            if (afi[filei].state_crc != ANIDB_FILE_STATE_CRCOK) {
+                printf("%s%s", sep, afi[filei].state_crc == ANIDB_FILE_STATE_CRCERR ? "CRCERR" : "CRCUNK");
+                sep = " ";
+            }
+            if (afi[filei].state_cen == ANIDB_FILE_STATE_UNC)
+                printf("%sCENSORED", sep);
+            printf(")");
+        }
+        printf("\n");
     }
     if (goodc == filesc) printf("Everything OK\n");
 
@@ -461,10 +648,10 @@ int main(int argc, char *argv[]) {
         }
     }
 
-#if 1
+#if !OFFLINE
     anidb_session_logout(&session);
-    anidb_session_fini(&session);
 #endif
+    anidb_session_fini(&session);
 
     rhash_free(rctx);
 
