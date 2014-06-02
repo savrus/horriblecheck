@@ -1,5 +1,5 @@
 /**
- * HorribleCheck version -0.1 (minus 0.1)
+ * HorribleCheck version -0.2 (minus 0.2)
  * Verify that you have downloaded an animu correctly without watching it!
  *
  * Copyleft: 2014, savrus
@@ -21,6 +21,10 @@
 #include <wordexp.h>
 #include <sys/stat.h>
 #include <termios.h>
+#include <linux/limits.h>
+#include <sys/types.h>
+#include <dirent.h>
+#include <ctype.h>
 #include "rhash.h"
 
 #define OFFLINE 0
@@ -134,8 +138,11 @@ struct anidb_fileinfo {
 #define ANIDB_FILE_STATE_CEN    (2)
 
 int anidb_fileinfo_parse(const char *str, const char *fmask_str, const char *amask_str, struct anidb_fileinfo *afinfo) {
-    if (!sstartswith(str, "220 FILE ")) return -1;
-    str += strlen("220 FILE ");
+    if (sstartswith(str, "220 FILE ")) str += strlen("220 FILE ");
+    else if (sstartswith(str, "322 MULTIPLE FILES FOUND ")) str += strlen("322 MULTIPLE FILES FOUND ");
+    else return -1;
+    //FIXME only first file is supported for answer answer "322 MULTIPLE FILES FOUND".
+    //also may be some problems with the last field.
 
     memset(afinfo, 0, sizeof(struct anidb_fileinfo));
 
@@ -144,6 +151,8 @@ int anidb_fileinfo_parse(const char *str, const char *fmask_str, const char *ama
     char *buf = afinfo->buf;
 
     int i;
+    for (i = strlen(buf)-1; i >= 0 && isspace(buf[i]); --i) buf[i] = '\0';
+
     char *fmask = afinfo->fmask;
     char *amask = afinfo->amask;
     char mask[3] = {0,0,0};
@@ -276,7 +285,7 @@ int anidb_comm_init(struct anidb_comm *comm) {
     if ((comm->socket = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("cannot create socket");
         return -1;
-    } 
+    }
     struct sockaddr_in sa = { AF_INET, htons(9000), {INADDR_ANY}} ;
     //FIXME gethostbyname()
     if(inet_aton("50.30.46.102", &sa.sin_addr)==0) {
@@ -386,6 +395,7 @@ int anidb_session_query(struct anidb_session *session) {
          printf("Query string is too large\n");
          return -1;
     }
+    session->rbuf[0] = '\0';
     int r = anidb_comm_sendrecv(&session->comm, session->sbuf, len+len1, session->rbuf, session->rlen);
     if (r == -1) return -1;
     if (sstartswith(session->rbuf, "505 ")||sstartswith(session->rbuf, "598 ")) {
@@ -441,8 +451,10 @@ int anidb_session_file(struct anidb_session *session, const char *ed2k, long lon
         return -1;
     }
 
-    //FIXME answer "322 MULTIPLE FILES FOUND" is unsupported here
-    anidb_fileinfo_parse(session->rbuf, fmask, amask, afinfo);
+    if (anidb_fileinfo_parse(session->rbuf, fmask, amask, afinfo) == -1) {
+        printf("Couldn't parse FILE reply \"%s\" for query \"%s\"\n", session->rbuf, session->sbuf);
+        return -1;
+    }
 
     return 1;
 }
@@ -450,18 +462,19 @@ int anidb_session_file(struct anidb_session *session, const char *ed2k, long lon
 //======================== manage files ================================
 
 struct fileinfo {
-    char *filename;
+    char filename[PATH_MAX];
     long long size;
     char ed2k[33];
     char crc32[9];
     int good;
 };
 
-int fill_fileinfo(struct fileinfo *fi, char *filename, rhash rctx) {
+int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
     struct stat st;
     stat(filename, &st);
     fi->size = st.st_size;
-    fi->filename = filename;
+    if (strlen(filename) > sizeof(fi->filename) - 1) return -1;
+    strcpy(fi->filename, filename);
     FILE *f = fopen(filename, "rb");
     if (f == NULL) return -1;
     rhash_file_update(rctx,f);
@@ -515,12 +528,348 @@ char * gp_readline(char *buf, unsigned int size, int echooff)
 
 //======================= Main programm ================================
 
+long directory_nfiles(const char *dirname) {
+    DIR *dp;
+    struct dirent *de;
+    long nfiles = 0;
+    if ((dp = opendir(dirname)) != NULL) {
+        while ((de = readdir(dp)) != NULL) if (de->d_type == DT_REG) ++nfiles;
+        closedir(dp);
+    } else {
+        perror("opendir");
+        return -1;
+    }
+    return nfiles;
+}
+
+int check_file(const char *filename, struct fileinfo *fi, struct anidb_fileinfo *afi, struct anidb_session *session, rhash rctx) {
+    printf("%s", filename);
+    fflush(stdout);
+    int r;
+    r = fill_fileinfo(fi, filename, rctx);
+    if (r == -1) {
+        printf(" ERR (unable to open file)\n");
+        return r;
+    }
+    r = anidb_session_file(session, fi->ed2k, fi->size, afi);
+    printf(" %s", r == 1 ? "OK" : "ERR");
+    if (r == 1) {
+        printf(" {[%s] %s - %s}", afi->gsname, afi->aname, afi->epno);
+        if (afi->state_ver > 1 || afi->state_crc != ANIDB_FILE_STATE_CRCOK || afi->state_cen == ANIDB_FILE_STATE_CEN) {
+            printf(" {");
+            char *sep = "";
+            if (afi->state_ver > 1) {
+                printf("V%d", afi->state_ver);
+                sep = " ";
+            }
+            if (afi->state_crc != ANIDB_FILE_STATE_CRCOK) {
+                printf("%s%s", sep, afi->state_crc == ANIDB_FILE_STATE_CRCERR ? "CRCERR" : "CRCUNK");
+                sep = " ";
+            }
+            if (afi->state_cen == ANIDB_FILE_STATE_UNC)
+                printf("%sCENSORED", sep);
+            printf("}");
+        }
+        printf("\n");
+    }
+    return r;
+}
+
+int write_sfv_file(struct fileinfo *fi, int filesc, const char *sfvfile) {
+    int i;
+    FILE *f = fopen(sfvfile, "w");
+    if (f == NULL) {
+        printf("Unable to open sfv file \"%s\"\n", sfvfile);
+        return -1;
+    } else {
+        printf("Write %s\n", sfvfile);
+        fprintf(f,"; Generated by horriblecheck v-0.1\n\n");
+        for(i = 0; i < filesc; i++) fprintf(f, "; %lld %s\n", fi[i].size, fi[i].filename);
+        for(i = 0; i < filesc; i++) fprintf(f, "%s %s\n", fi[i].filename, fi[i].crc32);
+        fclose(f);
+    }
+    return 0;
+}
+
+int check_directory(const char *dirname, struct anidb_session *session, rhash rctx) {
+    int gooddir = 0;
+    int ret = 0;
+    if (chdir(dirname) == -1) {
+        perror("chdir");
+        printf("Could not chdir to directory \"%s\"\n", dirname);
+        return -1;
+    }
+
+    long filesc = directory_nfiles(".");
+    if (filesc == 0) {
+        printf("Warning: directory '%s' is empty\n", dirname);
+        goto leave;
+    }
+
+    struct fileinfo *fi = calloc(filesc, sizeof(struct fileinfo));
+    if (fi == NULL) {
+        perror("calloc");
+        ret = -1;
+        goto leave;
+
+    }
+    struct anidb_fileinfo *afi = calloc(filesc, sizeof(struct anidb_fileinfo));
+    if (afi == NULL) {
+        perror("calloc");
+        free(fi);
+        ret = -1;
+        goto leave;
+    }
+
+    unsigned char *episodes = NULL;
+    DIR *dp;
+    struct dirent *de;
+    int filei = 0;
+    int goodi = 0;
+    int aid = 0;
+    int gid = 0;
+    int neps = 0;
+    int einanime = 1;
+    int eingroup = 1;
+    int allgood = 1;
+    int nocrc = 0;
+    if ((dp = opendir(".")) != NULL) {
+        while ((de = readdir(dp)) != NULL) {
+            // FIXME need to sort files...
+            if (de->d_type != DT_REG) continue;
+            int r = check_file(de->d_name, &fi[filei], &afi[filei], session, rctx);
+            if (r == 1) {
+                ++goodi;
+
+                if (aid == 0) aid = afi[filei].aid;
+                else if (aid != afi[filei].aid) {
+                    einanime = 0;
+                    continue;
+                }
+                if (gid == 0) gid = afi[filei].gid;
+                else if (gid != afi[filei].gid) {
+                    eingroup = 0;
+                }
+                if (neps == 0) {
+                    neps = afi[filei].maxepno;
+                    episodes = calloc(neps+1, sizeof(unsigned char));
+                    if (episodes == NULL) {
+                        perror("calloc");
+                        ret = -1;
+                        goto leave_ep;
+                    }
+                }
+                char *end;
+                long int epno = strtol(afi[filei].epno,&end,10);
+                if (*end != '\0') {
+                    printf("Episode number '%s' is not a number\n", afi[filei].epno);
+                    allgood = 0;
+                } else if (epno > neps) {
+                    printf("Episode number '%s' is larger than maximum episode number %d (total episodes %d)\n", afi[filei].epno, afi[filei].maxepno, afi[filei].totaleps);
+                    allgood = 0;
+                } else if (episodes[epno]) {
+                    printf("Episode '%s' appears more than once\n", afi[filei].epno);
+                    allgood = 0;
+                } else {
+                    episodes[epno] = 1;
+                }
+                if (afi[filei].state_crc == ANIDB_FILE_STATE_CRCERR) {
+                    allgood = 0;
+                }
+                if (afi[filei].state_crc == 0) {
+                    nocrc = 1;
+                }
+            }
+            filei++;
+        }
+        closedir(dp);
+        gooddir = goodi == filesc;
+        if (afi[0].totaleps == 0) { printf("Animu is not finished\n"); gooddir = 0; }
+        if (!einanime) { printf("There are files from different animus\n"); gooddir = 0; }
+        if (!eingroup) { printf("There are files from different groups\n"); gooddir = 0; }
+        int i;
+        int nmiss = 0;
+        for (i = 1; i < neps; ++i) if (!episodes[i]) ++nmiss;
+        if (nmiss > 0) {
+            printf("Episode%s", nmiss == 1 ? "" : "s");
+            char *sep = "";
+            for (i = 1; i < neps; ++i) {
+                if (!episodes[i]) printf("%s %d", sep, i);
+                sep = ",";
+            }
+            printf(" %s missing\n", nmiss == 1 ? "is" : "are");
+            gooddir = 0;
+        }
+        if (gooddir && allgood && nocrc) {
+            // FIXME write svf if there were files with unknown crc status.
+            // Note, that we don't look for crc in a file name.
+            // Maybe, this need to be fixed.
+            // Some about filename too
+            char name[ANIDB_PACKET_SIZE];
+            int i = 0, j;
+            if (i < sizeof(name)) name[i++] = '[';
+            for(j = 0; i < sizeof(name) && afi[0].gsname[j] != '\0'; ++i, ++j) {
+                name[i] = afi[0].gsname[j];
+            }
+            if (i < sizeof(name)-1) {
+                name[i++] = ']';
+                name[i++] = ' ';
+            }
+            for(j = 0; i < sizeof(name)-1 && afi[0].aname[j] != '\0'; ++i, ++j) {
+                char c = afi[0].aname[j];
+                if (c == ':') {
+                    name[i++] = ' ';
+                    name[i] = '-';
+                } else if (c == '/' || c=='|' || c==';' || c=='<' || c=='>') {
+                    name[i] = ' ';
+                } else {
+                    name[i] = afi[0].aname[j];
+                }
+            }
+            if (i < sizeof(name)-5) {
+                strcpy(&name[i], ".sfv");
+                i += 4;
+            }
+            if (name[i] != '\0') {
+                printf("Error: Buffer is too small to hold a name for sfv file.\n");
+                return ret;
+            }
+            write_sfv_file(fi, filesc, name);
+        }
+    } else {
+        perror("opendir");
+        ret = -1;
+    }
+
+    if (episodes != NULL) free(episodes);
+
+leave_ep:
+    free(afi);
+    free(fi);
+
+leave:
+    if (chdir("..") == -1) {
+        perror("chdir");
+        printf("Could not chdir to directory \"..\"\n");
+        return -2;
+    }
+
+    if (gooddir && allgood) {
+        if (allgood) printf("Everything OK\n");
+        else printf("There are minor problems, but directory is good enough\n");
+
+        char name[ANIDB_PACKET_SIZE];
+        int i = 0, j;
+        for(j = 0; i < sizeof(name)-1 && afi[0].aname[j] != '\0'; ++i, ++j) {
+            char c = afi[0].aname[j];
+            if (c == ':') {
+                name[i++] = ' ';
+                name[i] = '-';
+            } else if (c == '/' || c=='|' || c==';' || c=='<' || c=='>') {
+                name[i] = ' ';
+            } else {
+                name[i] = afi[0].aname[j];
+            }
+        }
+        if (i < sizeof(name)-1) {
+            name[i++] = ' ';
+            name[i++] = '=';
+        }
+        for(j = 0;i < sizeof(name) && afi[0].gsname[j] != '\0'; ++i, ++j) {
+            name[i] = afi[0].gsname[j];
+        }
+        if (i < sizeof(name)-1) {
+            name[i++] = '=';
+            name[i] = '\0';
+        }
+        if (name[i] != '\0') {
+            printf("Error: Buffer is too small to hold a new name.\n");
+            return ret;
+        }
+        char *path = malloc((strlen(dirname) + strlen(name) + 2) * sizeof(char));
+        if (path == NULL) {
+            perror("malloc");
+            return ret;
+        }
+        strcpy(path, dirname);
+        for (i = strlen(path) - 1; i > 0 && path[i] == '/'; --i) path[i] = '\0';
+        char *p = strrchr(path, '/');
+        p = (p == NULL) ? path : p + 1;
+        strcpy(p, name);
+
+        printf("Rename directory '%s' to '%s'\n", dirname, path);
+        if (rename(dirname, path) == -1) {
+            perror("rename");
+            printf("Unable to rename directory '%s'\n", dirname);
+        }
+        free(path);
+    }
+
+    return ret;
+}
+
+int check_directory_list(int argc, char *argv[], struct anidb_session *session, rhash rctx) {
+    int diri;
+    for (diri = 0; diri < argc; ++diri) {
+        #if 0
+        wordexp_t wexp;
+        int r;
+        if ((r = wordexp(argv[diri], &wexp, 0)) != 0 || wexp.we_wordc < 1) {
+            printf("wordexp() failed to expand path \"%s\", ret %d", argv[diri], r);
+            return -1;
+        }
+        if (check_directory(wexp.we_wordv[0], session, rctx) <= -2) {
+        #endif
+        if (check_directory(argv[diri], session, rctx) <= -2) {
+            printf("Grave error while processing directories. Aborting.\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int check_file_list(int argc, char *argv[], struct anidb_session *session, rhash rctx, char *sfvfile) {
+    int ret = 0;
+    int filesc = argc;
+    struct fileinfo *fi = calloc(filesc, sizeof(struct fileinfo));
+    if (fi == NULL) {
+        perror("calloc");
+        return -1;
+    }
+    struct anidb_fileinfo *afi = calloc(filesc, sizeof(struct anidb_fileinfo));
+    if (afi == NULL) {
+        perror("calloc");
+        free(fi);
+        return -1;
+    }
+
+    int filei;
+    int goodc = 0;
+    for (filei = 0; filei < argc; ++filei) {
+        int r = check_file(argv[filei], &fi[filei], &afi[filei], session, rctx);
+        if (r == 1) {
+            goodc++;
+        }
+    }
+    if (goodc == filesc) printf("Everything OK\n");
+
+    if (goodc == filesc && sfvfile) {
+        ret = write_sfv_file(fi, filesc, sfvfile);
+    }
+
+    free(afi);
+    free(fi);
+
+    return ret;
+}
+
 
 int main(int argc, char *argv[]) {
     char username_buf[256], password_buf[256];
     char *username = NULL;
     char *password = NULL;
     char *sfvfile = NULL;
+    int directory_mod = 0;
 
     int argi;
     for (argi = 1; argi < argc && argv[argi][0] == '-'; ++argi) {
@@ -536,6 +885,10 @@ int main(int argc, char *argv[]) {
         if (!strcmp(argv[argi], "-u") || !strcmp(argv[argi], "--user")) {
             if (argi == argc - 1) usage();
             username = argv[++argi];
+            continue;
+        }
+        if (!strcmp(argv[argi], "-d") || !strcmp(argv[argi], "--dir")) {
+            directory_mod = 1;
             continue;
         }
     }
@@ -564,18 +917,6 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    int filesc = argc - argi;
-    struct fileinfo *fi = calloc(filesc, sizeof(struct fileinfo));
-    if (fi == NULL) {
-        perror("calloc");
-        exit(1);
-    }
-    struct anidb_fileinfo *afi = calloc(filesc, sizeof(struct anidb_fileinfo));
-    if (afi == NULL) {
-        perror("calloc");
-        exit(1);
-    }
-    
     printf("Timeout for each query is %d seconds. Be patient.\n", ANIDB_WAIT);
 
     struct anidb_session session;
@@ -594,58 +935,10 @@ int main(int argc, char *argv[]) {
     //
     printf("Warning! Logged into AniDB database. Please don't abort to avoid loosing this session\n");
 
-    int filei;
-    int goodc = 0;
-    for (filei = 0; argi < argc; ++argi, ++filei) {
-        printf("%s", argv[argi]);
-        fflush(stdout);
-        int r;
-        r = fill_fileinfo(&fi[filei], argv[argi], rctx);
-        if (r == -1) {
-            printf(" ERR (unable to open file)\n");
-            continue;
-        }
-
-        #if 1
-        r = anidb_session_file(&session, fi[filei].ed2k, fi[filei].size, &afi[filei]);
-        if (r == 1) {
-            fi[filei].good = 1;
-            goodc++;
-        }
-        #endif
-        printf(" %s", r == 1 ? "OK" : "ERR");
-        if (afi[filei].state_ver > 1 || afi[filei].state_crc != ANIDB_FILE_STATE_CRCOK || afi[filei].state_cen == ANIDB_FILE_STATE_CEN) {
-            printf(" (");
-            char *sep = "";
-            if (afi[filei].state_ver > 1) {
-                printf("V%d", afi[filei].state_ver);
-                sep = " ";
-            }
-            if (afi[filei].state_crc != ANIDB_FILE_STATE_CRCOK) {
-                printf("%s%s", sep, afi[filei].state_crc == ANIDB_FILE_STATE_CRCERR ? "CRCERR" : "CRCUNK");
-                sep = " ";
-            }
-            if (afi[filei].state_cen == ANIDB_FILE_STATE_UNC)
-                printf("%sCENSORED", sep);
-            printf(")");
-        }
-        printf("\n");
-    }
-    if (goodc == filesc) printf("Everything OK\n");
-
-    if (goodc == filesc && sfvfile) {
-        int i;
-        FILE *f = fopen(sfvfile, "w");
-        if (f == NULL) {
-            printf("Unable to open file \"%s\"\n", sfvfile);
-            exit(1);
-        } else {
-            printf("Write %s\n", sfvfile);
-            fprintf(f,"; Generated by horriblecheck v-0.1\n\n");
-            for(i = 0; i < filesc; i++) fprintf(f, "; %lld %s\n", fi[i].size, fi[i].filename);
-            for(i = 0; i < filesc; i++) fprintf(f, "%s %s\n", fi[i].filename, fi[i].crc32);
-            fclose(f);
-        }
+    if (directory_mod) {
+        check_directory_list(argc-argi, argv+argi, &session, rctx);
+    } else {
+        check_file_list(argc-argi, argv+argi, &session, rctx, sfvfile);
     }
 
 #if !OFFLINE
@@ -654,8 +947,6 @@ int main(int argc, char *argv[]) {
     anidb_session_fini(&session);
 
     rhash_free(rctx);
-
-    free(fi);
 
     return 0;
 }
