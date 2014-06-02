@@ -571,8 +571,8 @@ int check_file(const char *filename, struct fileinfo *fi, struct anidb_fileinfo 
                 printf("%sCENSORED", sep);
             printf("}");
         }
-        printf("\n");
     }
+    printf("\n");
     return r;
 }
 
@@ -644,6 +644,7 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
 
                 if (aid == 0) aid = afi[filei].aid;
                 else if (aid != afi[filei].aid) {
+                    //FIXME: there could be some OVA, etc
                     einanime = 0;
                     continue;
                 }
@@ -656,6 +657,7 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
                     episodes = calloc(neps+1, sizeof(unsigned char));
                     if (episodes == NULL) {
                         perror("calloc");
+                        closedir(dp);
                         ret = -1;
                         goto leave_ep;
                     }
@@ -663,11 +665,11 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
                 char *end;
                 long int epno = strtol(afi[filei].epno,&end,10);
                 if (*end != '\0') {
-                    printf("Episode number '%s' is not a number\n", afi[filei].epno);
-                    allgood = 0;
+                    //printf("Episode number '%s' is not a number\n", afi[filei].epno);
+                    //allgood = 0;
                 } else if (epno > neps) {
-                    printf("Episode number '%s' is larger than maximum episode number %d (total episodes %d)\n", afi[filei].epno, afi[filei].maxepno, afi[filei].totaleps);
-                    allgood = 0;
+                    //printf("Episode number '%s' is larger than maximum episode number %d (total episodes %d)\n", afi[filei].epno, afi[filei].maxepno, afi[filei].totaleps);
+                    //allgood = 0;
                 } else if (episodes[epno]) {
                     printf("Episode '%s' appears more than once\n", afi[filei].epno);
                     allgood = 0;
@@ -684,10 +686,12 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
             filei++;
         }
         closedir(dp);
+        if (goodi == 0) goto leave_ep;
+
         gooddir = goodi == filesc;
         if (afi[0].totaleps == 0) { printf("Animu is not finished\n"); gooddir = 0; }
         if (!einanime) { printf("There are files from different animus\n"); gooddir = 0; }
-        if (!eingroup) { printf("There are files from different groups\n"); gooddir = 0; }
+        if (!eingroup) { printf("There are files from different groups\n"); allgood = 0; }
         int i;
         int nmiss = 0;
         for (i = 1; i < neps; ++i) if (!episodes[i]) ++nmiss;
@@ -755,9 +759,12 @@ leave:
         return -2;
     }
 
-    if (gooddir && allgood) {
+    if (gooddir) {
         if (allgood) printf("Everything OK\n");
-        else printf("There are minor problems, but directory is good enough\n");
+        else {
+            printf("There are minor problems, but directory is good enough\n");
+            if (nocrc) printf("There are some files with unknown crc status - better look at them\n");
+        }
 
         char name[ANIDB_PACKET_SIZE];
         int i = 0, j;
