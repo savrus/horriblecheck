@@ -472,6 +472,7 @@ struct fileinfo {
 int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
     struct stat st;
     stat(filename, &st);
+    if (!S_ISREG(st.st_mode)) return -1;
     fi->size = st.st_size;
     if (strlen(filename) > sizeof(fi->filename) - 1) return -1;
     strcpy(fi->filename, filename);
