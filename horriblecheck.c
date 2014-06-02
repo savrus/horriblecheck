@@ -637,6 +637,10 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
     if ((dp = opendir(".")) != NULL) {
         while ((de = readdir(dp)) != NULL) {
             // FIXME need to sort files...
+            if (de->d_type == DT_DIR && strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
+                //FIXME need to traverse subdirectories too
+                printf("Skipped subdirectory '%s'\n", de->d_name);
+            }
             if (de->d_type != DT_REG) continue;
             int r = check_file(de->d_name, &fi[filei], &afi[filei], session, rctx);
             if (r == 1) {
