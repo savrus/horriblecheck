@@ -33,6 +33,12 @@
 int sstartswith(const char *s1, const char *s2) {
     return ! strncmp(s1, s2, strlen(s2));
 }
+int sendswith(const char *s1, const char *s2) {
+    int i = strlen(s1)-1, j = strlen(s2)-1;
+    if (i < j) return 0;
+    for (; j >= 0; --i, --j) if (s1[i] != s2[j]) return 0;
+    return 1;
+}
 
 //======================= Query cache ================================
 //
@@ -540,12 +546,24 @@ char * gp_readline(char *buf, unsigned int size, int echooff)
 
 //======================= Check files and directories ====================
 
+int animufile(const char *filename) {
+    if (sendswith(filename, ".zip")) return 0;
+    if (sendswith(filename, ".sfv")) return 0;
+    if (sendswith(filename, ".txt")) return 0;
+    if (sendswith(filename, ".md5")) return 0;
+    if (sendswith(filename, ".nfo")) return 0;
+    if (!strcmp(filename, "sfv")) return 0;
+    if (!strcmp(filename, "md5")) return 0;
+    if (!strcmp(filename, "sha1")) return 0;
+    return 1;
+}
+
 long directory_nfiles(const char *dirname) {
     DIR *dp;
     struct dirent *de;
     long nfiles = 0;
     if ((dp = opendir(dirname)) != NULL) {
-        while ((de = readdir(dp)) != NULL) if (de->d_type == DT_REG) ++nfiles;
+        while ((de = readdir(dp)) != NULL) if (de->d_type == DT_REG && animufile(de->d_name)) ++nfiles;
         closedir(dp);
     } else {
         perror("opendir");
@@ -652,7 +670,7 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
                 //FIXME need to traverse subdirectories too
                 printf("Skipped subdirectory '%s'\n", de->d_name);
             }
-            if (de->d_type != DT_REG) continue;
+            if (de->d_type != DT_REG || !animufile(de->d_name)) continue;
             int r = check_file(de->d_name, &fi[filei], &afi[filei], session, rctx);
             if (r == 1) {
                 ++goodi;
