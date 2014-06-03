@@ -487,12 +487,12 @@ struct fileinfo {
 };
 
 int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
+    assert(strlen(filename) < sizeof(fi->filename) - 1);
+    strcpy(fi->filename, filename);
     struct stat st;
     stat(filename, &st);
     if (!S_ISREG(st.st_mode)) return -1;
     fi->size = st.st_size;
-    if (strlen(filename) > sizeof(fi->filename) - 1) return -1;
-    strcpy(fi->filename, filename);
     FILE *f = fopen(filename, "rb");
     if (f == NULL) return -1;
     rhash_file_update(rctx,f);
@@ -502,6 +502,12 @@ int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
     rhash_reset(rctx);
     fclose(f);
     return 0;
+}
+
+int compar_fileinfo(const void *a1, const void *a2) {
+    struct fileinfo *f1 = (struct fileinfo*) a1;
+    struct fileinfo *f2 = (struct fileinfo*) a2;
+    return strcmp(f1->filename, f2->filename);
 }
 
 //============================ Halp ====================================
@@ -772,6 +778,7 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
                 printf("Error: Buffer is too small to hold a name for sfv file.\n");
                 return ret;
             }
+            qsort(fi, filesc, sizeof(struct fileinfo), compar_fileinfo);
             write_sfv_file(fi, filesc, name);
         }
     } else {
