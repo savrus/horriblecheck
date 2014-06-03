@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <ctype.h>
+#include <signal.h>
 #include "rhash.h"
 
 #define OFFLINE 0
@@ -381,12 +382,22 @@ int anidb_session_auth(struct anidb_session *session, const char *user, const ch
     return -1;
 }
 int anidb_session_logout(struct anidb_session *session) {
+    if (session->session_key == NULL) {
+        printf("Trying to logout when Not signed in\n");
+        return -1;
+    }
     size_t len = snprintf(session->sbuf, session->slen, "LOGOUT s=%s", session->session_key);
     if (len +1 > session->slen) {
         printf("Line is too large\n");
         return -1;
     }
-    return anidb_comm_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen);
+    int r = anidb_comm_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen);
+    if (r == -1) {
+        printf("Logout failed\n");
+    }
+    free(session->session_key);
+    session->session_key = NULL;
+    return 0;
 }
 int anidb_session_query(struct anidb_session *session) {
     size_t len = strlen(session->sbuf);
@@ -527,7 +538,7 @@ char * gp_readline(char *buf, unsigned int size, int echooff)
 
 }
 
-//======================= Main programm ================================
+//======================= Check files and directories ====================
 
 long directory_nfiles(const char *dirname) {
     DIR *dp;
@@ -875,6 +886,36 @@ int check_file_list(int argc, char *argv[], struct anidb_session *session, rhash
     return ret;
 }
 
+//======================= Handle interrupts ========================
+
+struct anidb_session *g_session;
+
+void ctrlc_handler(int signo, siginfo_t *sinfo, void *context) {
+    //if (signo != SIGINT) {
+        psignal(signo, "\nCaught signal");
+    //}
+    if (g_session->session_key) {
+        //printf("Logout from AniDB\n");
+        anidb_session_logout(g_session);
+    }
+    exit(0);
+}
+
+int set_ctrlc_handler() {
+    struct sigaction sa = {.sa_sigaction = ctrlc_handler, .sa_flags = SA_SIGINFO };
+    if (sigfillset(&sa.sa_mask) == -1) {
+        printf("Warning: unable to fill signal mask");
+    }
+    if (sigaction(SIGINT, &sa, NULL) == -1) {
+        perror("sigaction");
+        printf("Could not set Ctrl-C handler");
+    }
+    return 0;
+}
+
+
+
+//============================= main() =============================
 
 int main(int argc, char *argv[]) {
     char username_buf[256], password_buf[256];
@@ -932,6 +973,10 @@ int main(int argc, char *argv[]) {
     printf("Timeout for each query is %d seconds. Be patient.\n", ANIDB_WAIT);
 
     struct anidb_session session;
+    g_session = &session;
+    
+    set_ctrlc_handler();
+
     if (anidb_session_init(&session) == -1) {
         printf("Unable to connect ot AniDB\n");
         exit(1);
@@ -941,11 +986,6 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 #endif
-    //
-    // FIXME: should catch Ctrl-C and logout from AniDB in case of iterrupt.
-    // Open connections cause ban for a while
-    //
-    printf("Warning! Logged into AniDB database. Please don't abort to avoid loosing this session\n");
 
     if (directory_mod) {
         check_directory_list(argc-argi, argv+argi, &session, rctx);
