@@ -936,7 +936,8 @@ int set_ctrlc_handler() {
     }
     if (sigaction(SIGINT, &sa, NULL) == -1) {
         perror("sigaction");
-        printf("Could not set Ctrl-C handler");
+        printf("Could not set Ctrl-C handler\n");
+        return -1;
     }
     return 0;
 }
