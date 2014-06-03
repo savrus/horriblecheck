@@ -487,7 +487,10 @@ struct fileinfo {
 };
 
 int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
-    assert(strlen(filename) < sizeof(fi->filename) - 1);
+    if (strlen(filename) > sizeof(fi->filename) - 1) {
+        printf("File name '%s' is too large to fit into internal buffer\n", filename);
+        return -1;
+    }
     strcpy(fi->filename, filename);
     struct stat st;
     stat(filename, &st);
