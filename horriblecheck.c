@@ -741,8 +741,10 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
             printf("Episode%s", nmiss == 1 ? "" : "s");
             char *sep = "";
             for (i = 1; i < neps; ++i) {
-                if (!episodes[i]) printf("%s %d", sep, i);
-                sep = ",";
+                if (!episodes[i]) {
+                    printf("%s %d", sep, i);
+                    sep = ",";
+                }
             }
             printf(" %s missing\n", nmiss == 1 ? "is" : "are");
             gooddir = 0;
