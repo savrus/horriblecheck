@@ -561,6 +561,9 @@ int animufile(const char *filename) {
     if (sendswith(filename, ".txt")) return 0;
     if (sendswith(filename, ".md5")) return 0;
     if (sendswith(filename, ".nfo")) return 0;
+    if (sendswith(filename, ".srt")) return 0;
+    if (sendswith(filename, ".ass")) return 0;
+    if (sendswith(filename, ".ssa")) return 0;
     if (!strcmp(filename, "sfv")) return 0;
     if (!strcmp(filename, "md5")) return 0;
     if (!strcmp(filename, "sha1")) return 0;
