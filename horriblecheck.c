@@ -531,12 +531,17 @@ struct fileinfo {
     int good;
 };
 
-int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
+int set_filename(struct fileinfo *fi, const char *filename) {
     if (strlen(filename) > sizeof(fi->filename) - 1) {
         printf("File name '%s' is too large to fit into internal buffer\n", filename);
         return -1;
     }
     strcpy(fi->filename, filename);
+    return 0;
+}
+
+int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
+    if (set_filename(fi, filename) != 0) return -1;
     struct stat st;
     stat(filename, &st);
     if (!S_ISREG(st.st_mode)) return -1;
@@ -552,7 +557,7 @@ int fill_fileinfo(struct fileinfo *fi, const char *filename, rhash rctx) {
     return 0;
 }
 
-int compar_fileinfo(const void *a1, const void *a2) {
+int cmp_fileinfo(const void *a1, const void *a2) {
     struct fileinfo *f1 = (struct fileinfo*) a1;
     struct fileinfo *f2 = (struct fileinfo*) a2;
     return strcmp(f1->filename, f2->filename);
@@ -630,6 +635,33 @@ long directory_nfiles(const char *dirname) {
     return nfiles;
 }
 
+int directory_read(const char *dirname, struct fileinfo *fi) {
+    DIR *dp;
+    struct dirent *de;
+    int res =  0;
+    long nfiles = 0;
+    if ((dp = opendir(dirname)) != NULL) {
+        while ((de = readdir(dp)) != NULL) {
+            if (de->d_type == DT_DIR && strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
+                //FIXME need to traverse subdirectories too
+                printf("Skipped subdirectory '%s'\n", de->d_name);
+            }
+
+            if (de->d_type == DT_REG && animufile(de->d_name)) {
+                if (set_filename(&fi[nfiles], de->d_name) != 0) res = -1;
+                nfiles++;
+            }
+        }
+        qsort(fi, nfiles, sizeof(struct fileinfo), cmp_fileinfo);
+        closedir(dp);
+    } else {
+        perror("opendir");
+        res = -1;
+    }
+    return res;
+
+}
+
 int check_file(const char *filename, struct fileinfo *fi, struct anidb_fileinfo *afi, struct anidb_session *session, rhash rctx) {
     printf("%s", filename);
     fflush(stdout);
@@ -701,6 +733,13 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
         goto leave;
 
     }
+
+    if (directory_read(".", fi) != 0) {
+        free(fi);
+        ret = -1;
+        goto leave;
+    }
+
     struct anidb_fileinfo *afi = calloc(filesc, sizeof(struct anidb_fileinfo));
     if (afi == NULL) {
         perror("calloc");
@@ -710,8 +749,6 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
     }
 
     unsigned char *episodes = NULL;
-    DIR *dp;
-    struct dirent *de;
     int filei = 0;
     int goodi = 0;
     int aid = 0;
@@ -721,123 +758,108 @@ int check_directory(const char *dirname, struct anidb_session *session, rhash rc
     int eingroup = 1;
     int allgood = 1;
     int nocrc = 0;
-    if ((dp = opendir(".")) != NULL) {
-        while ((de = readdir(dp)) != NULL) {
-            // FIXME need to sort files...
-            if (de->d_type == DT_DIR && strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) {
-                //FIXME need to traverse subdirectories too
-                printf("Skipped subdirectory '%s'\n", de->d_name);
-            }
-            if (de->d_type != DT_REG || !animufile(de->d_name)) continue;
-            int r = check_file(de->d_name, &fi[filei], &afi[filei], session, rctx);
-            if (r == 1) {
-                ++goodi;
 
-                if (aid == 0) aid = afi[filei].aid;
-                else if (aid != afi[filei].aid) {
-                    //FIXME: there could be some OVA, etc
-                    einanime = 0;
-                    continue;
-                }
-                if (gid == 0) gid = afi[filei].gid;
-                else if (gid != afi[filei].gid) {
-                    eingroup = 0;
-                }
-                if (neps == 0) {
-                    neps = afi[filei].maxepno;
-                    episodes = calloc(neps+1, sizeof(unsigned char));
-                    if (episodes == NULL) {
-                        perror("calloc");
-                        closedir(dp);
-                        ret = -1;
-                        goto leave_ep;
-                    }
-                }
-                char *end;
-                long int epno = strtol(afi[filei].epno,&end,10);
-                if (*end != '\0') {
-                    //printf("Episode number '%s' is not a number\n", afi[filei].epno);
-                    //allgood = 0;
-                } else if (epno > neps) {
-                    //printf("Episode number '%s' is larger than maximum episode number %d (total episodes %d)\n", afi[filei].epno, afi[filei].maxepno, afi[filei].totaleps);
-                    //allgood = 0;
-                } else if (episodes[epno]) {
-                    printf("Episode '%s' appears more than once\n", afi[filei].epno);
-                    allgood = 0;
-                } else {
-                    episodes[epno] = 1;
-                }
-                if (afi[filei].state_crc == ANIDB_FILE_STATE_CRCERR) {
-                    allgood = 0;
-                }
-                if (afi[filei].state_crc == 0) {
-                    nocrc = 1;
-                }
-            }
-            filei++;
-        }
-        closedir(dp);
-        if (goodi == 0) goto leave_ep;
+    for (filei = 0; filei < filesc; ++filei) {
+        int r = check_file(fi[filei].filename, &fi[filei], &afi[filei], session, rctx);
+        if (r == 1) {
+            ++goodi;
 
-        gooddir = goodi == filesc;
-        if (afi[0].totaleps == 0) { printf("Animu is not finished\n"); gooddir = 0; }
-        if (!einanime) { printf("There are files from different animus\n"); gooddir = 0; }
-        if (!eingroup) { printf("There are files from different groups\n"); allgood = 0; }
-        int i;
-        int nmiss = 0;
-        for (i = 1; i < neps; ++i) if (!episodes[i]) ++nmiss;
-        if (nmiss > 0) {
-            printf("Episode%s", nmiss == 1 ? "" : "s");
-            char *sep = "";
-            for (i = 1; i < neps; ++i) {
-                if (!episodes[i]) {
-                    printf("%s %d", sep, i);
-                    sep = ",";
+            if (aid == 0) aid = afi[filei].aid;
+            else if (aid != afi[filei].aid) {
+                //FIXME: there could be some OVA, etc
+                einanime = 0;
+                continue;
+            }
+            if (gid == 0) gid = afi[filei].gid;
+            else if (gid != afi[filei].gid) {
+                eingroup = 0;
+            }
+            if (neps == 0) {
+                neps = afi[filei].maxepno;
+                episodes = calloc(neps+1, sizeof(unsigned char));
+                if (episodes == NULL) {
+                    ret = -1;
+                    goto leave_ep;
                 }
             }
-            printf(" %s missing\n", nmiss == 1 ? "is" : "are");
-            gooddir = 0;
-        }
-        if (gooddir && allgood && nocrc) {
-            // FIXME write svf if there were files with unknown crc status.
-            // Note, that we don't look for crc in a file name.
-            // Maybe, this need to be fixed.
-            // Some about filename too
-            char name[ANIDB_PACKET_SIZE];
-            int i = 0, j;
-            if (i < sizeof(name)) name[i++] = '[';
-            for(j = 0; i < sizeof(name) && afi[0].gsname[j] != '\0'; ++i, ++j) {
-                name[i] = afi[0].gsname[j];
+            char *end;
+            long int epno = strtol(afi[filei].epno,&end,10);
+            if (*end != '\0') {
+                //printf("Episode number '%s' is not a number\n", afi[filei].epno);
+                //allgood = 0;
+            } else if (epno > neps) {
+                //printf("Episode number '%s' is larger than maximum episode number %d (total episodes %d)\n", afi[filei].epno, afi[filei].maxepno, afi[filei].totaleps);
+                //allgood = 0;
+            } else if (episodes[epno]) {
+                printf("Episode '%s' appears more than once\n", afi[filei].epno);
+                allgood = 0;
+            } else {
+                episodes[epno] = 1;
             }
-            if (i < sizeof(name)-1) {
-                name[i++] = ']';
+            if (afi[filei].state_crc == ANIDB_FILE_STATE_CRCERR) {
+                allgood = 0;
+            }
+            if (afi[filei].state_crc == 0) {
+                nocrc = 1;
+            }
+        }
+    }
+    if (goodi == 0) goto leave_ep;
+
+    gooddir = goodi == filesc;
+    if (afi[0].totaleps == 0) { printf("Animu is not finished\n"); gooddir = 0; }
+    if (!einanime) { printf("There are files from different animus\n"); gooddir = 0; }
+    if (!eingroup) { printf("There are files from different groups\n"); allgood = 0; }
+    int i;
+    int nmiss = 0;
+    for (i = 1; i < neps; ++i) if (!episodes[i]) ++nmiss;
+    if (nmiss > 0) {
+        printf("Episode%s", nmiss == 1 ? "" : "s");
+        char *sep = "";
+        for (i = 1; i < neps; ++i) {
+            if (!episodes[i]) {
+                printf("%s %d", sep, i);
+                sep = ",";
+            }
+        }
+        printf(" %s missing\n", nmiss == 1 ? "is" : "are");
+        gooddir = 0;
+    }
+    if (gooddir && allgood && nocrc) {
+        // FIXME write svf if there were files with unknown crc status.
+        // Note, that we don't look for crc in a file name.
+        // Maybe, this need to be fixed.
+        // Some about filename too
+        char name[ANIDB_PACKET_SIZE];
+        int i = 0, j;
+        if (i < sizeof(name)) name[i++] = '[';
+        for(j = 0; i < sizeof(name) && afi[0].gsname[j] != '\0'; ++i, ++j) {
+            name[i] = afi[0].gsname[j];
+        }
+        if (i < sizeof(name)-1) {
+            name[i++] = ']';
+            name[i++] = ' ';
+        }
+        for(j = 0; i < sizeof(name)-1 && afi[0].aname[j] != '\0'; ++i, ++j) {
+            char c = afi[0].aname[j];
+            if (c == ':') {
                 name[i++] = ' ';
+                name[i] = '-';
+            } else if (c == '/' || c=='|' || c==';' || c=='<' || c=='>') {
+                name[i] = ' ';
+            } else {
+                name[i] = afi[0].aname[j];
             }
-            for(j = 0; i < sizeof(name)-1 && afi[0].aname[j] != '\0'; ++i, ++j) {
-                char c = afi[0].aname[j];
-                if (c == ':') {
-                    name[i++] = ' ';
-                    name[i] = '-';
-                } else if (c == '/' || c=='|' || c==';' || c=='<' || c=='>') {
-                    name[i] = ' ';
-                } else {
-                    name[i] = afi[0].aname[j];
-                }
-            }
-            if (i < sizeof(name)-5) {
-                strcpy(&name[i], ".sfv");
-                i += 4;
-            }
-            if (name[i] != '\0') {
-                printf("Error: Buffer is too small to hold a name for sfv file.\n");
-                return ret;
-            }
-            qsort(fi, filesc, sizeof(struct fileinfo), compar_fileinfo);
-            write_sfv_file(fi, filesc, name);
         }
-    } else {
-        perror("opendir");
-        ret = -1;
+        if (i < sizeof(name)-5) {
+            strcpy(&name[i], ".sfv");
+            i += 4;
+        }
+        if (name[i] != '\0') {
+            printf("Error: Buffer is too small to hold a name for sfv file.\n");
+            return ret;
+        }
+        write_sfv_file(fi, filesc, name);
     }
 
     if (episodes != NULL) free(episodes);
