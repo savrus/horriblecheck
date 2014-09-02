@@ -40,6 +40,51 @@ int sendswith(const char *s1, const char *s2) {
     return 1;
 }
 
+//==================== Save account in file ==========================
+//
+//
+#define ACCOUNT_FILENAME "~/.horriblecheck.pass"
+#define ACCOUNT_BUF_SIZE (256)
+struct account {
+    char username[ACCOUNT_BUF_SIZE];
+    char password[ACCOUNT_BUF_SIZE];
+};
+
+int account_read(struct account *ac) {
+    FILE *fd;
+    int res = 0;
+    wordexp_t wexp;
+    if (wordexp(ACCOUNT_FILENAME, &wexp, 0) != 0 || wexp.we_wordc < 1) {
+        printf("wordexp() failed to expand path \"%s\"", ACCOUNT_FILENAME);
+        return -1;
+    }
+    if ((fd = fopen(wexp.we_wordv[0], "r")) == NULL) res = -1;
+    if (!res && fscanf(fd, "%s", ac->username) != 1) res = -1;
+    if (!res && fscanf(fd, "%s", ac->password) != 1) res = -1;
+    if (fd != NULL && fclose(fd)) res = -1;
+    wordfree(&wexp);
+    return res;
+}
+
+int account_write(struct account *ac) {
+    FILE *fd;
+    int res = 0;
+    wordexp_t wexp;
+    if (wordexp(ACCOUNT_FILENAME, &wexp, 0) != 0 || wexp.we_wordc < 1) {
+        printf("wordexp() failed to expand path \"%s\"", ACCOUNT_FILENAME);
+        return -1;
+    }
+    if ((fd = fopen(wexp.we_wordv[0], "w")) == NULL) res = -1;
+    if (!res && !chmod(wexp.we_wordv[0], 0600)) {
+        if (fprintf(fd, "%s\n%s\n", ac->username, ac->password) < 0) res = -1;
+    } else {
+        res = -1;
+    }
+    if (fd != NULL && fclose(fd)) res = -1;
+    wordfree(&wexp);
+    return res;
+}
+
 //======================= Query cache ================================
 //
 // AniDB want us to store answers to old queries. Okay.
@@ -541,11 +586,12 @@ static void gp_echo_restore(struct termios *gp)
 char * gp_readline(char *buf, unsigned int size, int echooff)
 {
     struct termios gp;
+    char *s;
     if (echooff) gp_echo_off(&gp);
     buf[size - 1] = 0;
-    buf = fgets(buf, size, stdin);
+    s = fgets(buf, size, stdin);
     if (echooff) {gp_echo_restore(&gp); printf("\n"); }
-    if (buf && (size = strlen(buf)) > 0 && buf[size - 1] == '\n') {
+    if (s && (size = strlen(buf)) > 0 && buf[size - 1] == '\n') {
         buf[size - 1] = 0;
         return buf;
     } else
@@ -947,14 +993,36 @@ int set_ctrlc_handler() {
     return 0;
 }
 
+//======================== Get username/password ===================
 
+void get_account(char *username, struct account *ac) {
+    if (username == NULL) {
+        if (account_read(ac) == 0) {
+            return;
+        }
+
+        printf("User: ");
+        fflush(stdout);
+        if (gp_readline(ac->username, sizeof(ac->username), 0) == NULL) {
+            printf("Bad username\n");
+            exit(1);
+        }
+    }
+    printf("Password: ");
+    fflush(stdout);
+    if (gp_readline(ac->password, sizeof(ac->password), 1) == NULL) {
+        printf("Badd password\n");
+        exit(1);
+    }
+    if (username == NULL) {
+        account_write(ac);
+    }
+}
 
 //============================= main() =============================
 
 int main(int argc, char *argv[]) {
-    char username_buf[256], password_buf[256];
     char *username = NULL;
-    char *password = NULL;
     char *sfvfile = NULL;
     int directory_mod = 0;
 
@@ -980,22 +1048,9 @@ int main(int argc, char *argv[]) {
         }
     }
     if (argi >= argc) usage();
-    if (username == NULL) {
-        printf("User: ");
-        fflush(stdout);
-        username = gp_readline(username_buf, sizeof(username_buf), 0);
-        if (username == NULL) {
-            printf("Bad username\n");
-            exit(1);
-        }
-    }
-    printf("Password: ");
-    fflush(stdout);
-    password = gp_readline(password_buf, sizeof(password_buf), 1);
-    if (password == NULL) {
-        printf("Badd password\n");
-        exit(1);
-    }
+
+    struct account ac;
+    get_account(username, &ac);
 
     rhash_library_init();
     rhash rctx = rhash_init(RHASH_ED2K|RHASH_CRC32);
@@ -1016,7 +1071,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 #if !OFFLINE
-    if (anidb_session_auth(&session, username, password) == -1) {
+    if (anidb_session_auth(&session, ac.username, ac.password) == -1) {
         exit(1);
     }
 #endif
