@@ -385,7 +385,7 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
     if (comm->debug) { fprintf(stderr, "%s (send) %s\n", ctime(&now), s); }
     //FIXME send, recv return values
     send(comm->socket, s, slen,0);
-    size_t received = recv(comm->socket, r, rlen-1, 0);
+    ssize_t received = recv(comm->socket, r, rlen-1, 0);
     comm->last = time(NULL);
     if (received == -1) {
         perror("recv");
