@@ -130,6 +130,7 @@ int anidb_cache_add_entry(struct anidb_cache *cache, const char *key, const char
         printf("Write to cache failed\n");
         return -1;
     }
+    fflush(cache->fd);
     return 0;
 }
 int anidb_cache_find_entry(struct anidb_cache *cache, const char *key, char *vbuf, size_t vlen) {
