@@ -399,6 +399,7 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
             sleep(nsec);
         }
     }
+    if (ntries > 0) printf("\n");
     comm->last = time(NULL);
     if (received < 0) {
         perror("sendv");
