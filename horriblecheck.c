@@ -385,12 +385,22 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
     now = time(NULL);
     if (comm->debug) { fprintf(stderr, "%s (send) %s\n", ctime(&now), s); }
     //FIXME send, recv return values
-    send(comm->socket, s, slen,0);
-    ssize_t received = recv(comm->socket, r, rlen-1, 0);
+    ssize_t received = send(comm->socket, s, slen, 0);
+    comm->last = time(NULL);
+    if (received < 0) {
+        perror("sendv");
+        return received;
+    }
+    int ntries;
+    received = -1;
+    for (ntries = 30; ntries > 0 && received < 0; --ntries) {
+        received = recv(comm->socket, r, rlen-1, MSG_DONTWAIT);
+        if (received < 0) sleep(1);
+    }
     comm->last = time(NULL);
     if (received == -1) {
         perror("recv");
-        return -1;
+        return received;
     }
     if (received == 0) {
         printf("recv: received zero bytes\n");
@@ -401,38 +411,48 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
     if (comm->debug) { fprintf(stderr, "%s (recv) %s\n", ctime(&now), r); }
     return 0;
 }
-
+int anidb_comm_try_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, size_t rlen, int ntries) {
+    int res;
+    do {
+        res = anidb_comm_sendrecv(comm, s, slen, r, rlen);
+    } while (--ntries > 0 && res < 0);
+    return res;
+}
 //======================= AniDB session stuff ================================
 
 #define ANIDB_BUF_SIZE (2048)
 
 struct anidb_session {
     struct anidb_comm comm;
+    struct account *ac;
     char *session_key;
     char sbuf[ANIDB_BUF_SIZE], rbuf[ANIDB_BUF_SIZE];
     size_t slen, rlen;
     struct anidb_cache cache;
 };
-int anidb_session_init(struct anidb_session *session) {
+int anidb_session_init(struct anidb_session *session, struct account *ac) {
+    session->ac = ac;
     session->session_key = NULL;
     session->slen = ANIDB_BUF_SIZE;
     session->rlen = ANIDB_BUF_SIZE;
     if (anidb_cache_open(&session->cache) == -1) return -1;
     return anidb_comm_init(&session->comm);
 }
+int anidb_session_logout(struct anidb_session *session);
 void anidb_session_fini(struct anidb_session *session) {
+    anidb_session_logout(session);
     anidb_comm_fini(&session->comm);
     anidb_cache_close(&session->cache);
     if (session->session_key != NULL) { free(session->session_key); session->session_key = NULL; }
 }
 
-int anidb_session_auth(struct anidb_session *session, const char *user, const char *pass) {
-    size_t len = snprintf(session->sbuf, session->slen, "AUTH user=%s&pass=%s&protover=3&client=horriblecheck&clientver=0", user, pass);
+int anidb_session_auth(struct anidb_session *session) {
+    size_t len = snprintf(session->sbuf, session->slen, "AUTH user=%s&pass=%s&protover=3&client=horriblecheck&clientver=0", session->ac->username, session->ac->password);
     if (len +1 > session->slen) {
         printf("Line is too large\n");
         return -1;
     }
-    int r = anidb_comm_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen);
+    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen, 2);
     if (r == -1) return -1;
 
     if (sstartswith(session->rbuf, "200 ") || sstartswith(session->rbuf, "201 ")) {
@@ -440,6 +460,7 @@ int anidb_session_auth(struct anidb_session *session, const char *user, const ch
         while(session->rbuf[i] != ' ' && i < session->rlen) i++;
         if (i == session->rlen) {
             printf("Auth failed (no session key found): %s\n", session->rbuf);
+            return -1;
         }
         session->session_key = strndup(session->rbuf + 4, i - 4);
         return 0;
@@ -447,17 +468,30 @@ int anidb_session_auth(struct anidb_session *session, const char *user, const ch
     printf("Auth failed: %s\n", session->rbuf);
     return -1;
 }
+void anidb_session_login(struct anidb_session *session) {
+#if OFFLINE
+    return;
+#endif
+    if (session->session_key == NULL) {
+        char *s = strdup(session->sbuf);
+        if (anidb_session_auth(session) != 0) {
+            //FIXME: failed to login, quit.
+            exit(1);
+        }
+        strcpy(session->sbuf, s);
+        free(s);
+    }
+}
 int anidb_session_logout(struct anidb_session *session) {
     if (session->session_key == NULL) {
-        printf("Trying to logout when Not signed in\n");
-        return -1;
+        return 0;
     }
     size_t len = snprintf(session->sbuf, session->slen, "LOGOUT s=%s", session->session_key);
     if (len +1 > session->slen) {
         printf("Line is too large\n");
         return -1;
     }
-    int r = anidb_comm_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen);
+    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen, 1);
     if (r == -1) {
         printf("Logout failed\n");
     }
@@ -465,7 +499,8 @@ int anidb_session_logout(struct anidb_session *session) {
     session->session_key = NULL;
     return 0;
 }
-int anidb_session_query(struct anidb_session *session) {
+int anidb_session_do_query(struct anidb_session *session, int retry) {
+    anidb_session_login(session);
     size_t len = strlen(session->sbuf);
     size_t len1 = snprintf(session->sbuf + len, session->slen - len, "&s=%s", session->session_key);
     if (len1 + 1 > session->slen - len) {
@@ -473,33 +508,50 @@ int anidb_session_query(struct anidb_session *session) {
          return -1;
     }
     session->rbuf[0] = '\0';
-    int r = anidb_comm_sendrecv(&session->comm, session->sbuf, len+len1, session->rbuf, session->rlen);
+    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+len1, session->rbuf, session->rlen, 2);
     if (r == -1) return -1;
     if (sstartswith(session->rbuf, "505 ")||sstartswith(session->rbuf, "598 ")) {
         printf("Got answer \"%s\" for the query \"%s\", please check the program\n",session->rbuf, session->sbuf);
-        return -1;
+        //FIXME: Strange reply, quit;
+        exit(1);
     }
     if (sstartswith(session->rbuf, "555 ")) {
         printf("Got answer \"%s\" for the query \"%s\", you won't be able to connect for about 30 min\n",session->rbuf, session->sbuf);
-        return -1;
+        anidb_session_logout(session);
+        //FXIME: got a ban, quit
+        exit(1);
     }
     if (session->rbuf[0] == '6'
         && session->rbuf[1] == '0'
         && session->rbuf[2] >= '0' && session->rbuf[2] <= '4'
         && session->rbuf[3] >= ' ' ) {
-        printf("Got answer \"%s\" for the query \"%s\", conection problems, handling not implemented\n",session->rbuf, session->sbuf);
-        return -1;
+        int nsec = 3 * ANIDB_WAIT;
+        printf("Got answer \"%s\" for the query \"%s\", conection problems, retry after %d seconds\n",session->rbuf, session->sbuf, nsec);
+        if (retry) {
+            sleep(nsec);
+            return anidb_session_do_query(session, --retry);
+        }
+        //FIXME: Failed after retry, exit.
+        exit(1);
     }
     if (session->rbuf[0] == '6'
         && session->rbuf[1] == '0'
         && (session->rbuf[2] == '1' || session->rbuf[2] == '2' || session->rbuf[2] == '6')
         && session->rbuf[3] >= ' ' ) {
-        // If ever implemented, need to keep track of logins to avoid flood here
-        printf("Got answer \"%s\" for the query \"%s\", have to relogin, but not implemented\n",session->rbuf, session->sbuf);
-        return -1;
+        printf("Got answer \"%s\" for the query \"%s\", have to relogin\n",session->rbuf, session->sbuf);
+        if (retry) {
+            anidb_session_logout(session);
+            anidb_session_login(session);
+            return anidb_session_do_query(session, 0);
+        }
+        //FIXME: Failed after retry, exit.
+        exit(1);
     }
     session->sbuf[len] = '\0';
     return 0;
+}
+int anidb_session_query(struct anidb_session *session) {
+    return anidb_session_do_query(session, 1);
 }
 int anidb_session_file(struct anidb_session *session, const char *ed2k, long long size, struct anidb_fileinfo *afinfo) {
     char *fmask = "7108";
@@ -1143,28 +1195,21 @@ int main(int argc, char *argv[]) {
 
     struct anidb_session session;
     g_session = &session;
-    
+
     set_ctrlc_handler();
 
-    if (anidb_session_init(&session) == -1) {
+    if (anidb_session_init(&session, &ac) == -1) {
         printf("Unable to connect ot AniDB\n");
         exit(1);
     }
-#if !OFFLINE
-    if (anidb_session_auth(&session, ac.username, ac.password) == -1) {
-        exit(1);
-    }
-#endif
-
     if (directory_mod) {
         check_directory_list(argc-argi, argv+argi, &session, rctx, clear_versions);
     } else {
         check_file_list(argc-argi, argv+argi, &session, rctx, sfvfile);
     }
 
-#if !OFFLINE
-    anidb_session_logout(&session);
-#endif
+    printf("Quitting... (be patient)\n");
+
     anidb_session_fini(&session);
 
     rhash_free(rctx);
