@@ -343,6 +343,7 @@ int anidb_cmp_state(struct anidb_fileinfo *afi1, struct anidb_fileinfo *afi2 ) {
 // might be right before the current one.
 //
 #define ANIDB_WAIT (5)
+#define ANIDB_PACKET_WAIT (30)
 struct anidb_comm {
     int socket;
     time_t last;
@@ -384,16 +385,29 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
 
     now = time(NULL);
     if (comm->debug) { fprintf(stderr, "%s (send) %s\n", ctime(&now), s); }
-    //FIXME send, recv return values
-    ssize_t received = send(comm->socket, s, slen, 0);
+    int ntries;
+    ssize_t received = -1;
+    for (ntries = 0; ntries < ANIDB_PACKET_WAIT && received < 0; ntries++) {
+        received = send(comm->socket, s, slen, MSG_DONTWAIT);
+        if (received < 0) {
+            int nsec = ntries < 5 ? (1<< ntries) : (1 << 5);
+            if (ntries == 1) printf("Failed to send() a packet, wait");
+            if (ntries > 0) {
+                printf(" %d", nsec);
+                fflush(NULL);
+            }
+            sleep(nsec);
+        }
+    }
     comm->last = time(NULL);
     if (received < 0) {
         perror("sendv");
-        return received;
+        printf("Unable to send() a packet\n");
+        //FIXME: send() failed, quit.
+        exit(1);
     }
-    int ntries;
     received = -1;
-    for (ntries = 30; ntries > 0 && received < 0; --ntries) {
+    for (ntries = 0; ntries < ANIDB_PACKET_WAIT && received < 0; ntries++) {
         received = recv(comm->socket, r, rlen-1, MSG_DONTWAIT);
         if (received < 0) sleep(1);
     }
