@@ -329,6 +329,7 @@ int anidb_is_state_better(struct anidb_fileinfo *afi1, struct anidb_fileinfo *af
 }
 
 int anidb_cmp_state(struct anidb_fileinfo *afi1, struct anidb_fileinfo *afi2 ) {
+    if (afi1->aid != afi2->aid || afi1->eid != afi2->eid || afi1->gid != afi2->gid) return 0;
     if (anidb_is_state_better(afi1, afi2)) return -1;
     if (anidb_is_state_better(afi2, afi1)) return 1;
     return 0;
