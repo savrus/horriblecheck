@@ -392,18 +392,20 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
         received = send(comm->socket, s, slen, MSG_DONTWAIT);
         if (received < 0) {
             int nsec = ntries < 5 ? (1<< ntries) : (1 << 5);
-            if (ntries == 1) printf("Failed to send() a packet, wait");
-            if (ntries > 0) {
-                printf(" %d", nsec);
-                fflush(NULL);
+            if (comm->debug) {
+                if (ntries == 1) printf("Failed to send() a packet, wait");
+                if (ntries >= 1) {
+                    printf(" %d", nsec);
+                    fflush(NULL);
+                }
             }
             sleep(nsec);
         }
     }
-    if (ntries > 0) printf("\n");
+    if (comm->debug) if (ntries > 1) printf("\n");
     comm->last = time(NULL);
     if (received < 0) {
-        perror("sendv");
+        if (comm->debug) perror("sendv");
         printf("Unable to send() a packet\n");
         //FIXME: send() failed, quit.
         exit(1);
@@ -415,11 +417,11 @@ int anidb_comm_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char *r, 
     }
     comm->last = time(NULL);
     if (received == -1) {
-        perror("recv");
+        if (comm->debug) perror("recv");
         return received;
     }
     if (received == 0) {
-        printf("recv: received zero bytes\n");
+        if (comm->debug) printf("recv: received zero bytes\n");
         return -1;
     }
     r[received - (r[received-1] == '\n' ? 1:0)] = '\0';
@@ -432,6 +434,9 @@ int anidb_comm_try_sendrecv(struct anidb_comm *comm, char *s, size_t slen, char 
     do {
         res = anidb_comm_sendrecv(comm, s, slen, r, rlen);
     } while (--ntries > 0 && res < 0);
+    if (res < 0) {
+        fprintf(stderr, "Unable to send()/recv() a packet\n");
+    }
     return res;
 }
 //======================= AniDB session stuff ================================
@@ -468,7 +473,7 @@ int anidb_session_auth(struct anidb_session *session) {
         printf("Line is too large\n");
         return -1;
     }
-    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen, 2);
+    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen, 3);
     if (r == -1) return -1;
 
     if (sstartswith(session->rbuf, "200 ") || sstartswith(session->rbuf, "201 ")) {
@@ -507,7 +512,7 @@ int anidb_session_logout(struct anidb_session *session) {
         printf("Line is too large\n");
         return -1;
     }
-    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen, 1);
+    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+1, session->rbuf, session->rlen, 2);
     if (r == -1) {
         printf("Logout failed\n");
     }
@@ -524,7 +529,7 @@ int anidb_session_do_query(struct anidb_session *session, int retry) {
          return -1;
     }
     session->rbuf[0] = '\0';
-    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+len1, session->rbuf, session->rlen, 2);
+    int r = anidb_comm_try_sendrecv(&session->comm, session->sbuf, len+len1, session->rbuf, session->rlen, 3);
     if (r == -1) return -1;
     if (sstartswith(session->rbuf, "505 ")||sstartswith(session->rbuf, "598 ")) {
         printf("Got answer \"%s\" for the query \"%s\", please check the program\n",session->rbuf, session->sbuf);
