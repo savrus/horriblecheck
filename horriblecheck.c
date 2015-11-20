@@ -1157,6 +1157,13 @@ void get_account(char *username, struct account *ac) {
             printf("Bad username\n");
             exit(1);
         }
+    } else {
+        if (strlen(username) > sizeof(ac->username) - 1) {
+            printf("Bad username\n");
+            exit(1);
+        } else {
+            strcpy(ac->username, username);
+        }
     }
     printf("Password: ");
     fflush(stdout);
