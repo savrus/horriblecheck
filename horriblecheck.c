@@ -26,6 +26,7 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <signal.h>
+#include <errno.h>
 #include "rhash.h"
 
 #define OFFLINE 0
@@ -105,7 +106,11 @@ int anidb_cache_open(struct anidb_cache *cache) {
         printf("wordexp() failed to expand path \"%s\"", cache->filename);
         return -1;
     }
-    cache->fd = fopen(wexp.we_wordv[0], "rw+");
+    cache->fd = fopen(wexp.we_wordv[0], "r+");
+    if (cache->fd == NULL && errno == ENOENT) {
+        // If cache does not exist try to create it.
+        cache->fd = fopen(wexp.we_wordv[0], "w+");
+    }
     wordfree(&wexp);
     if (cache->fd == NULL) {
         perror("fopen");
